@@ -243,6 +243,9 @@ version_in_range() {
 }
 
 
+# 공통 find 제외 경로 (가상FS, 마운트, 컨테이너 등)
+FIND_PRUNE="-path /proc -prune -o -path /sys -prune -o -path /dev -prune -o -path /run -prune -o -path /mnt -prune -o -path /snap -prune -o -path /var/lib/docker -prune -o -path /var/lib/lxd -prune -o -path /var/lib/containers -prune"
+
 get_ip_addresses() {
     if command -v ip &>/dev/null; then
         ip -4 addr show 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | grep -v '^127\.' | tr '\n' ',' | sed 's/,$//'
@@ -886,7 +889,7 @@ check_U15() {
     local status="$STATUS_PASS" detail=""
 
     local noowner_files
-    noowner_files=$(run_with_timeout 60 find / -path /proc -prune -o -path /sys -prune -o -path /dev -prune -o -path /run -prune -o \( -nouser -o -nogroup \) -print 2>/dev/null | head -20)
+    noowner_files=$(eval "run_with_timeout 30 find / $FIND_PRUNE -o \( -nouser -o -nogroup \) -print" 2>/dev/null | head -20)
 
     if [[ -n "$noowner_files" ]]; then
         status="$STATUS_FAIL"
@@ -1122,7 +1125,7 @@ check_U23() {
     local dangerous_suids="/usr/bin/newgrp /usr/sbin/traceroute /usr/bin/chfn /usr/bin/chsh /usr/bin/wall /usr/bin/write /usr/sbin/usernetctl"
 
     local suid_files
-    suid_files=$(run_with_timeout 60 find / -path /proc -prune -o -path /sys -prune -o -path /dev -prune -o -path /run -prune -o -type f \( -perm -4000 -o -perm -2000 \) -print 2>/dev/null | head -200)
+    suid_files=$(eval "run_with_timeout 30 find / $FIND_PRUNE -o -type f \( -perm -4000 -o -perm -2000 \) -print" 2>/dev/null | head -200)
 
     local found_dangerous=""
     if [[ -n "$suid_files" ]]; then
@@ -1199,7 +1202,7 @@ check_U25() {
     local status="$STATUS_PASS" detail=""
 
     local ww_files
-    ww_files=$(run_with_timeout 60 find / -path /proc -prune -o -path /sys -prune -o -path /dev -prune -o -path /run -prune -o -path /tmp -prune -o -path /var/tmp -prune -o -type f -perm -0002 -print 2>/dev/null | head -20)
+    ww_files=$(eval "run_with_timeout 30 find / $FIND_PRUNE -o -path /tmp -prune -o -path /var/tmp -prune -o -type f -perm -0002 -print" 2>/dev/null | head -20)
 
     if [[ -n "$ww_files" ]]; then
         status="$STATUS_FAIL"
@@ -1220,7 +1223,7 @@ check_U26() {
     local status="$STATUS_PASS" detail=""
 
     local dev_regular
-    dev_regular=$(find /dev -type f 2>/dev/null | grep -v -E '(/dev/\.udev|/dev/shm/)' | head -20)
+    dev_regular=$(run_with_timeout 10 find /dev -type f 2>/dev/null | grep -v -E '(/dev/\.udev|/dev/shm/)' | head -20)
 
     if [[ -n "$dev_regular" ]]; then
         status="$STATUS_FAIL"
@@ -3280,13 +3283,29 @@ check_D08() {
 # 8. 공개 취약점 관리 (V-01 ~ V-16)
 # =============================================================================
 
+# JAR 파일 한번만 검색하여 캐시 (6개 개별 find 대신)
+JAR_CACHE=""
+cache_jar_files() {
+    if [[ -z "$JAR_CACHE" ]]; then
+        JAR_CACHE=$(run_with_timeout 20 find /opt /usr /var /home /srv -name '*.jar' -type f 2>/dev/null | head -500)
+        [[ -z "$JAR_CACHE" ]] && JAR_CACHE="__EMPTY__"
+    fi
+}
+
+search_jar_cache() {
+    local pattern="$1"
+    [[ "$JAR_CACHE" == "__EMPTY__" ]] && return
+    echo "$JAR_CACHE" | grep "$pattern" | head -10
+}
+
 check_V01() {
     local id="V-01" category="공개 취약점 관리"
     local title="Apache Log4j 취약점 (CVE-2021-44228)" importance="상"
     local status="$STATUS_NA" detail=""
 
+    cache_jar_files
     local jars
-    jars=$(run_with_timeout 15 find /opt /usr /var /home /srv -name 'log4j-core-*.jar' -type f 2>/dev/null | head -10)
+    jars=$(search_jar_cache 'log4j-core-')
     if [[ -z "$jars" ]]; then
         current="log4j:log4j-core jar 미발견"
         detail="log4j-core jar 미발견"; add_result "$id" "$category" "$title" "$importance" "$status" "$detail" "$current"; return
@@ -3389,7 +3408,8 @@ check_V05() {
     local status="$STATUS_NA" detail=""
 
     local jars
-    jars=$(run_with_timeout 15 find /opt /usr /var /home /srv -name 'spring-beans-*.jar' -type f 2>/dev/null | head -10)
+    cache_jar_files
+    jars=$(search_jar_cache 'spring-beans-')
     if [[ -z "$jars" ]]; then
         current="spring-beans:spring-beans jar 미발견"
         detail="spring-beans jar 미발견"; add_result "$id" "$category" "$title" "$importance" "$status" "$detail" "$current"; return
@@ -3413,7 +3433,8 @@ check_V06() {
     local status="$STATUS_NA" detail=""
 
     local jars
-    jars=$(run_with_timeout 15 find /opt /usr /var /home /srv -name 'commons-text-*.jar' -type f 2>/dev/null | head -10)
+    cache_jar_files
+    jars=$(search_jar_cache 'commons-text-')
     if [[ -z "$jars" ]]; then
         current="commons-text:commons-text jar 미발견"
         detail="commons-text jar 미발견"; add_result "$id" "$category" "$title" "$importance" "$status" "$detail" "$current"; return
@@ -3437,7 +3458,8 @@ check_V07() {
     local status="$STATUS_NA" detail=""
 
     local jars
-    jars=$(run_with_timeout 15 find /opt /usr /var /home /srv -name 'struts2-core-*.jar' -type f 2>/dev/null | head -10)
+    cache_jar_files
+    jars=$(search_jar_cache 'struts2-core-')
     if [[ -z "$jars" ]]; then
         current="struts2:struts2-core jar 미발견"
         detail="struts2-core jar 미발견"; add_result "$id" "$category" "$title" "$importance" "$status" "$detail" "$current"; return
@@ -3466,7 +3488,8 @@ check_V08() {
     fi
 
     local jars
-    jars=$(run_with_timeout 15 find /opt /usr /var /home /srv -name 'activemq-broker-*.jar' -type f 2>/dev/null | head -5)
+    cache_jar_files
+    jars=$(search_jar_cache 'activemq-broker-')
     if [[ -z "$jars" ]]; then
         current="activemq:activemq-broker jar 미발견"
         detail="activemq-broker jar 미발견"; add_result "$id" "$category" "$title" "$importance" "$status" "$detail" "$current"; return
@@ -3493,7 +3516,8 @@ check_V09() {
     local status="$STATUS_NA" detail=""
 
     local jars
-    jars=$(run_with_timeout 15 find /opt /usr /var /home /srv -name 'shiro-core-*.jar' -type f 2>/dev/null | head -10)
+    cache_jar_files
+    jars=$(search_jar_cache 'shiro-core-')
     if [[ -z "$jars" ]]; then
         current="shiro:shiro-core jar 미발견"
         detail="shiro-core jar 미발견"; add_result "$id" "$category" "$title" "$importance" "$status" "$detail" "$current"; return
@@ -3522,7 +3546,7 @@ check_V10() {
     fi
 
     local war
-    war=$(run_with_timeout 10 find /opt /usr /var /home /srv -name 'jenkins.war' -type f 2>/dev/null | head -1)
+    war=$(run_with_timeout 5 find /opt /usr /var /home /srv -name 'jenkins.war' -type f 2>/dev/null | head -1)
     if [[ -z "$war" ]]; then
         current="jenkins.war 미발견"
         detail="jenkins.war 미발견"; add_result "$id" "$category" "$title" "$importance" "$status" "$detail" "$current"; return
