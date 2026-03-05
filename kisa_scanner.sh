@@ -40,11 +40,19 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --output|-o) OUTPUT_FILE="$2"; shift 2 ;;
+        --output|-o)
+            [[ -z "${2:-}" ]] && { echo "ERROR: --output 옵션에 파일 경로가 필요합니다" >&2; exit 1; }
+            OUTPUT_FILE="$2"; shift 2 ;;
         --help|-h)   usage ;;
         *)           echo "알 수 없는 옵션: $1" >&2; usage ;;
     esac
 done
+
+# root 권한 확인
+if [[ $EUID -ne 0 ]]; then
+    echo "ERROR: 이 스크립트는 root 권한이 필요합니다." >&2
+    exit 1
+fi
 
 if [[ -z "$OUTPUT_FILE" ]]; then
     OUTPUT_FILE="/tmp/kisa_scan_$(hostname)_$(date +%Y%m%d_%H%M%S).json"
@@ -64,6 +72,8 @@ json_escape() {
     s="${s//$'\n'/\\n}"
     s="${s//$'\r'/\\r}"
     s="${s//$'\t'/\\t}"
+    # Remove remaining control characters (0x00-0x1F) except already handled
+    s=$(printf '%s' "$s" | tr -d '\001-\010\013\014\016-\037')
     printf '%s' "$s"
 }
 
@@ -129,13 +139,18 @@ check_file_perm() {
     owner="$(get_file_owner "$file")"
     perms="$(get_octal_perms "$file")"
 
+    if [[ -z "$owner" || -z "$perms" ]]; then
+        CFP_DETAIL="stat 실패: ${file}"
+        return 1
+    fi
+
     if [[ "$expected_owner" != "*" && "$owner" != "$expected_owner" ]]; then
         CFP_DETAIL="소유자 부적절 (${owner}, 기대값: ${expected_owner})"
         fail=1
     fi
 
     if [[ -n "$max_perm" ]]; then
-        local actual=$((8#$perms))
+        local actual=$((8#${perms:-0}))
         local max=$((8#$max_perm))
         if (( (actual & ~max) != 0 )); then
             local msg="권한 부적절 (${perms}, 최대: ${max_perm})"
@@ -180,14 +195,13 @@ get_config_value() {
 get_sshd_config_value() {
     local key="$1"
     local val=""
-    if [[ -f /etc/ssh/sshd_config ]]; then
-        val=$(grep -v '^\s*#' /etc/ssh/sshd_config | grep -i "^\s*${key}\s" | tail -1 | awk '{print $2}')
-    fi
-    # Also check sshd_config.d
+    # sshd_config.d overrides (Include is typically at top, so .d files take precedence)
     if [[ -d /etc/ssh/sshd_config.d ]]; then
-        local dval
-        dval=$(grep -rh -v '^\s*#' /etc/ssh/sshd_config.d/ 2>/dev/null | grep -i "^\s*${key}\s" | tail -1 | awk '{print $2}')
-        [[ -n "$dval" ]] && val="$dval"
+        val=$(grep -rh -v '^\s*#' /etc/ssh/sshd_config.d/ 2>/dev/null | grep -i "^\s*${key}\s" | head -1 | awk '{print $2}')
+    fi
+    # Fall back to main config (OpenSSH uses first-match semantics)
+    if [[ -z "$val" && -f /etc/ssh/sshd_config ]]; then
+        val=$(grep -v '^\s*#' /etc/ssh/sshd_config | grep -i "^\s*${key}\s" | head -1 | awk '{print $2}')
     fi
     printf '%s' "$val"
 }
@@ -228,23 +242,6 @@ version_in_range() {
     return 1
 }
 
-# find_jar_version PATTERN DIRS → prints version from jar filename (e.g. log4j-core-2.14.1.jar → 2.14.1)
-find_jar_version() {
-    local pattern="$1" search_dir="$2"
-    local jar_files
-    jar_files=$(run_with_timeout 30 find "${search_dir:-/}" -name "${pattern}*.jar" -type f 2>/dev/null | head -20)
-    if [[ -z "$jar_files" ]]; then return 1; fi
-    local versions=""
-    while IFS= read -r f; do
-        local basename="${f##*/}"
-        # Extract version: pattern-VERSION.jar
-        local ver
-        ver=$(echo "$basename" | sed -E "s/^${pattern}-?//;s/\.jar$//")
-        [[ -n "$ver" ]] && versions="${versions} ${ver}"
-    done <<< "$jar_files"
-    echo "$versions"
-    return 0
-}
 
 get_ip_addresses() {
     if command -v ip &>/dev/null; then
@@ -542,7 +539,7 @@ check_U03() {
             local line
             line=$(grep -v '^\s*#' "$pf" | grep 'pam_faillock\|pam_tally2' | head -1)
             if [[ -n "$line" ]]; then
-                deny_val=$(echo "$line" | grep -oP 'deny=\K[0-9]+')
+                deny_val=$(echo "$line" | sed -n 's/.*deny=\([0-9]*\).*/\1/p')
                 if [[ -n "$deny_val" ]] && (( deny_val > 0 && deny_val <= 10 )); then
                     status="$STATUS_PASS"
                     detail="PAM deny=${deny_val} (${pf})"
@@ -715,11 +712,9 @@ check_U09() {
     done < /etc/group
 
     if [[ -n "$orphan_groups" ]]; then
-        # This is informational - not necessarily a fail for all cases
+        # KISA 기준: 불필요한 그룹이 존재하면 취약
+        status="$STATUS_FAIL"
         detail="사용자 없는 그룹 존재:${orphan_groups}"
-        # KISA 기준에서는 이것이 반드시 취약은 아님
-        status="$STATUS_PASS"
-        detail="점검 완료 - 시스템 그룹 외 사용자 없는 그룹:${orphan_groups}"
     else
         detail="모든 그룹에 계정 연결됨"
     fi
@@ -795,7 +790,7 @@ check_U12() {
     for f in /etc/profile /etc/bashrc /etc/bash.bashrc; do
         if [[ -f "$f" ]]; then
             local tv
-            tv=$(grep -v '^\s*#' "$f" | grep -oP 'TMOUT=\K[0-9]+' | tail -1)
+            tv=$(grep -v '^\s*#' "$f" | sed -n 's/.*TMOUT=\([0-9]*\).*/\1/p' | tail -1)
             if [[ -n "$tv" ]]; then
                 tmout_val="$tv"
                 tmout_found=1
@@ -810,7 +805,7 @@ check_U12() {
         for f in /etc/profile.d/*.sh; do
             [[ -f "$f" ]] || continue
             local tv
-            tv=$(grep -v '^\s*#' "$f" | grep -oP 'TMOUT=\K[0-9]+' | tail -1)
+            tv=$(grep -v '^\s*#' "$f" | sed -n 's/.*TMOUT=\([0-9]*\).*/\1/p' | tail -1)
             if [[ -n "$tv" ]]; then
                 tmout_val="$tv"
                 tmout_found=1
@@ -935,7 +930,7 @@ check_U17() {
             local owner perms
             owner=$(get_file_owner "$f")
             perms=$(get_octal_perms "$f")
-            local actual=$((8#$perms))
+            local actual=$((8#${perms:-0}))
             # Check other-write bit (o+w = 002)
             if [[ "$owner" != "root" ]] || (( actual & 002 )); then
                 findings="${findings} ${f}(${owner}:${perms})"
@@ -951,7 +946,7 @@ check_U17() {
             local owner perms
             owner=$(get_file_owner "$f")
             perms=$(get_octal_perms "$f")
-            local actual=$((8#$perms))
+            local actual=$((8#${perms:-0}))
             if [[ "$owner" != "root" ]] || (( actual & 002 )); then
                 findings="${findings} ${f}(${owner}:${perms})"
                 status="$STATUS_FAIL"
@@ -1068,7 +1063,7 @@ check_U21() {
                 fail=1
             fi
             # 권한: 640 이하
-            local actual=$((8#$perms))
+            local actual=$((8#${perms:-0}))
             local max=$((8#640))
             if (( (actual & ~max) != 0 )); then
                 fail=1
@@ -1108,7 +1103,7 @@ check_U22() {
     if [[ "$owner" != "root" && "$owner" != "bin" && "$owner" != "sys" ]]; then
         status="$STATUS_FAIL"
     fi
-    local actual=$((8#$perms))
+    local actual=$((8#${perms:-0}))
     local max=$((8#644))
     if (( (actual & ~max) != 0 )); then
         status="$STATUS_FAIL"
@@ -1127,7 +1122,7 @@ check_U23() {
     local dangerous_suids="/usr/bin/newgrp /usr/sbin/traceroute /usr/bin/chfn /usr/bin/chsh /usr/bin/wall /usr/bin/write /usr/sbin/usernetctl"
 
     local suid_files
-    suid_files=$(run_with_timeout 60 find / -path /proc -prune -o -path /sys -prune -o -path /dev -prune -o -path /run -prune -o -type f \( -perm -4000 -o -perm -2000 \) -print 2>/dev/null)
+    suid_files=$(run_with_timeout 60 find / -path /proc -prune -o -path /sys -prune -o -path /dev -prune -o -path /run -prune -o -type f \( -perm -4000 -o -perm -2000 \) -print 2>/dev/null | head -200)
 
     local found_dangerous=""
     if [[ -n "$suid_files" ]]; then
@@ -1173,7 +1168,7 @@ check_U24() {
             local owner perms
             owner=$(get_file_owner "$fp")
             perms=$(get_octal_perms "$fp")
-            local actual=$((8#$perms))
+            local actual=$((8#${perms:-0}))
 
             # 소유자 확인
             if [[ "$owner" != "$user" && "$owner" != "root" ]]; then
@@ -1369,12 +1364,12 @@ check_U30() {
         if [[ "$f" == "/etc/login.defs" ]]; then
             uv=$(grep -v '^\s*#' "$f" | grep '^\s*UMASK' | awk '{print $2}' | tail -1)
         else
-            uv=$(grep -v '^\s*#' "$f" | grep -oP 'umask\s+\K[0-9]+' | tail -1)
+            uv=$(grep -v '^\s*#' "$f" | sed -n 's/.*umask[[:space:]]*\([0-9]*\).*/\1/p' | tail -1)
         fi
-        if [[ -n "$uv" ]]; then
+        if [[ -n "$uv" && "$uv" =~ ^[0-7]+$ ]]; then
             umask_val="$uv"
             local umask_num=$((8#$uv))
-            if (( umask_num >= 8#022 )); then
+            if (( (umask_num & 8#022) == 8#022 )); then
                 status="$STATUS_PASS"
                 detail="UMASK=${uv} (${f})"
                 break
@@ -1405,7 +1400,7 @@ check_U31() {
         local owner perms
         owner=$(get_file_owner "$home")
         perms=$(get_octal_perms "$home")
-        local actual=$((8#$perms))
+        local actual=$((8#${perms:-0}))
 
         if [[ "$owner" != "$user" ]]; then
             findings="${findings} ${home}(소유자:${owner}!=기대:${user})"
@@ -1625,7 +1620,7 @@ check_U37() {
             local owner perms
             owner=$(get_file_owner "$f")
             perms=$(get_octal_perms "$f")
-            local actual=$((8#$perms))
+            local actual=$((8#${perms:-0}))
             if [[ "$owner" != "root" ]] || (( (actual & ~8#640) != 0 )); then
                 status="$STATUS_FAIL"
                 findings="${findings} ${f}(${owner}:${perms})"
@@ -1972,9 +1967,9 @@ check_U50() {
         status="$STATUS_FAIL"
         detail="DNS 실행 중이나 named.conf 미발견"
     else
-        if grep -v '^\s*//' "$named_conf" | grep -qi 'allow-transfer'; then
+        if grep -v '^\s*[#/]' "$named_conf" | grep -qi 'allow-transfer'; then
             local at
-            at=$(grep -v '^\s*//' "$named_conf" | grep -i 'allow-transfer' | head -1)
+            at=$(grep -v '^\s*[#/]' "$named_conf" | grep -i 'allow-transfer' | head -1)
             if echo "$at" | grep -q 'any'; then
                 status="$STATUS_FAIL"
                 detail="Zone Transfer 제한 없음 (allow-transfer any)"
@@ -2012,9 +2007,9 @@ check_U51() {
     if [[ -z "$named_conf" ]]; then
         detail="DNS 실행 중이나 named.conf 미발견"
     else
-        if grep -v '^\s*//' "$named_conf" | grep -qi 'allow-update'; then
+        if grep -v '^\s*[#/]' "$named_conf" | grep -qi 'allow-update'; then
             local au
-            au=$(grep -v '^\s*//' "$named_conf" | grep -i 'allow-update' | head -1)
+            au=$(grep -v '^\s*[#/]' "$named_conf" | grep -i 'allow-update' | head -1)
             if echo "$au" | grep -q 'any'; then
                 status="$STATUS_FAIL"
                 detail="동적 업데이트 제한 없음 (allow-update any)"
@@ -2392,7 +2387,7 @@ check_U63() {
         status="$STATUS_FAIL"
     fi
 
-    local actual=$((8#$perms))
+    local actual=$((8#${perms:-0}))
     local max=$((8#640))
     if (( (actual & ~max) != 0 )); then
         status="$STATUS_FAIL"
@@ -2428,8 +2423,8 @@ check_U64() {
                 if [[ -n "$last_line" ]]; then
                     # Extract date from log
                     local log_date
-                    log_date=$(echo "$last_line" | grep -oP '^\d{4}-\d{2}-\d{2}' | head -1)
-                    [[ -z "$log_date" ]] && log_date=$(echo "$last_line" | grep -oP '^[A-Z][a-z]{2}\s+\d+' | head -1)
+                    log_date=$(echo "$last_line" | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
+                    [[ -z "$log_date" ]] && log_date=$(echo "$last_line" | grep -oE '^[A-Z][a-z]{2}[[:space:]]+[0-9]+' | head -1)
                     if [[ -n "$log_date" ]]; then
                         last_update_date="$log_date"
                         local update_epoch
@@ -2493,7 +2488,7 @@ check_U64() {
                 last_line=$(grep -i 'install\|update' /var/log/zypper.log 2>/dev/null | tail -1)
                 if [[ -n "$last_line" ]]; then
                     local log_date
-                    log_date=$(echo "$last_line" | grep -oP '^\d{4}-\d{2}-\d{2}' | head -1)
+                    log_date=$(echo "$last_line" | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
                     if [[ -n "$log_date" ]]; then
                         last_update_date="$log_date"
                         local update_epoch
@@ -2634,7 +2629,7 @@ check_U67() {
         local owner perms
         owner="$(get_file_owner "$fp")"
         perms="$(get_octal_perms "$fp")"
-        local actual=$((8#$perms))
+        local actual=$((8#${perms:-0}))
         local max=$((8#644))
         if [[ "$owner" != "root" ]] || (( (actual & ~max) != 0 )); then
             status="$STATUS_FAIL"
@@ -2726,7 +2721,7 @@ check_W03() {
     status="$STATUS_FAIL"; local findings=""
     if [[ -n "$APACHE_CONF" ]]; then
         local lrb
-        lrb=$(grep -rh -v '^\s*#' "$APACHE_CONF" /etc/httpd/conf.d/*.conf /etc/apache2/conf-enabled/*.conf 2>/dev/null | grep -i 'LimitRequestBody' | head -1 | awk '{print $2}')
+        lrb=$(grep -rh -v '^\s*#' "$APACHE_CONF" /etc/httpd/conf.d/*.conf /etc/apache2/conf-enabled/*.conf /etc/apache2/sites-enabled/*.conf 2>/dev/null | grep -i 'LimitRequestBody' | head -1 | awk '{print $2}')
         if [[ -n "$lrb" ]]; then
             status="$STATUS_PASS"
             findings="${findings} Apache LimitRequestBody=${lrb}"
@@ -2762,8 +2757,8 @@ check_W04() {
     status="$STATUS_PASS"; local findings=""
     if [[ -n "$APACHE_CONF" ]]; then
         local ao
-        ao=$(grep -rh -v '^\s*#' "$APACHE_CONF" /etc/httpd/conf.d/*.conf /etc/apache2/conf-enabled/*.conf 2>/dev/null | grep -i 'AllowOverride' | head -3)
-        if echo "$ao" | grep -qi 'All'; then
+        ao=$(grep -rh -v '^\s*#' "$APACHE_CONF" /etc/httpd/conf.d/*.conf /etc/apache2/conf-enabled/*.conf /etc/apache2/sites-enabled/*.conf 2>/dev/null | grep -i 'AllowOverride' | head -3)
+        if echo "$ao" | grep -qiw 'All'; then
             status="$STATUS_FAIL"
             findings="${findings} Apache AllowOverride All 설정 존재"
         else
@@ -2788,8 +2783,8 @@ check_W05() {
     status="$STATUS_PASS"; local findings=""
     if [[ -n "$APACHE_CONF" ]]; then
         local st ss
-        st=$(grep -rh -v '^\s*#' "$APACHE_CONF" /etc/httpd/conf.d/*.conf /etc/apache2/conf-enabled/*.conf 2>/dev/null | grep -i 'ServerTokens' | tail -1 | awk '{print $2}')
-        ss=$(grep -rh -v '^\s*#' "$APACHE_CONF" /etc/httpd/conf.d/*.conf /etc/apache2/conf-enabled/*.conf 2>/dev/null | grep -i 'ServerSignature' | tail -1 | awk '{print $2}')
+        st=$(grep -rh -v '^\s*#' "$APACHE_CONF" /etc/httpd/conf.d/*.conf /etc/apache2/conf-enabled/*.conf /etc/apache2/sites-enabled/*.conf 2>/dev/null | grep -i 'ServerTokens' | tail -1 | awk '{print $2}')
+        ss=$(grep -rh -v '^\s*#' "$APACHE_CONF" /etc/httpd/conf.d/*.conf /etc/apache2/conf-enabled/*.conf /etc/apache2/sites-enabled/*.conf 2>/dev/null | grep -i 'ServerSignature' | tail -1 | awk '{print $2}')
         findings="${findings} Apache ServerTokens=${st:-미설정}, ServerSignature=${ss:-미설정}"
         if [[ "${st,,}" != "prod" && "${st,,}" != "productonly" ]] || [[ "${ss,,}" != "off" ]]; then
             status="$STATUS_FAIL"
@@ -2821,7 +2816,7 @@ check_W06() {
     status="$STATUS_PASS"; local findings=""
     if [[ -n "$APACHE_CONF" ]]; then
         local opts
-        opts=$(grep -rh -v '^\s*#' "$APACHE_CONF" /etc/httpd/conf.d/*.conf /etc/apache2/conf-enabled/*.conf 2>/dev/null | grep -i '^\s*Options' | head -5)
+        opts=$(grep -rh -v '^\s*#' "$APACHE_CONF" /etc/httpd/conf.d/*.conf /etc/apache2/conf-enabled/*.conf /etc/apache2/sites-enabled/*.conf 2>/dev/null | grep -i '^\s*Options' | head -5)
         if echo "$opts" | grep -qi 'FollowSymLinks' && ! echo "$opts" | grep -qi '\-FollowSymLinks'; then
             status="$STATUS_FAIL"
             findings="${findings} Apache FollowSymLinks 활성"
@@ -2846,7 +2841,7 @@ check_W07() {
 
     status="$STATUS_PASS"; local findings=""
     local opts
-    opts=$(grep -rh -v '^\s*#' "$APACHE_CONF" /etc/httpd/conf.d/*.conf /etc/apache2/conf-enabled/*.conf 2>/dev/null | grep -i '^\s*Options' | head -5)
+    opts=$(grep -rh -v '^\s*#' "$APACHE_CONF" /etc/httpd/conf.d/*.conf /etc/apache2/conf-enabled/*.conf /etc/apache2/sites-enabled/*.conf 2>/dev/null | grep -i '^\s*Options' | head -5)
     if echo "$opts" | grep -qi 'ExecCGI' && ! echo "$opts" | grep -qi '\-ExecCGI'; then
         status="$STATUS_FAIL"
         findings="Apache ExecCGI 활성"
@@ -2871,7 +2866,7 @@ check_W08() {
     status="$STATUS_PASS"; local findings=""
     if [[ -n "$APACHE_CONF" ]]; then
         local opts
-        opts=$(grep -rh -v '^\s*#' "$APACHE_CONF" /etc/httpd/conf.d/*.conf /etc/apache2/conf-enabled/*.conf 2>/dev/null | grep -i '^\s*Options' | head -5)
+        opts=$(grep -rh -v '^\s*#' "$APACHE_CONF" /etc/httpd/conf.d/*.conf /etc/apache2/conf-enabled/*.conf /etc/apache2/sites-enabled/*.conf 2>/dev/null | grep -i '^\s*Options' | head -5)
         if echo "$opts" | grep -qi 'Indexes' && ! echo "$opts" | grep -qi '\-Indexes'; then
             status="$STATUS_FAIL"
             findings="${findings} Apache Indexes 활성"
@@ -3145,7 +3140,7 @@ check_D05() {
         local umask_val=""
         for f in "${home}/.bashrc" "${home}/.bash_profile" "${home}/.profile"; do
             [[ -f "$f" ]] || continue
-            umask_val=$(grep -v '^\s*#' "$f" | grep -oP 'umask\s+\K[0-9]+' | tail -1)
+            umask_val=$(grep -v '^\s*#' "$f" | sed -n 's/.*umask[[:space:]]*\([0-9]*\).*/\1/p' | tail -1)
             [[ -n "$umask_val" ]] && break
         done
         if [[ -n "$umask_val" ]]; then
@@ -3249,9 +3244,9 @@ check_D08() {
     status="$STATUS_PASS"; local findings=""
     if [[ $MYSQL_INSTALLED -eq 1 ]]; then
         local ver
-        ver=$(mysql --version 2>/dev/null | grep -oP '[\d]+\.[\d]+\.[\d]+' | head -1)
+        ver=$(mysql --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
         if [[ -z "$ver" ]]; then
-            ver=$(mysqld --version 2>/dev/null | grep -oP '[\d]+\.[\d]+\.[\d]+' | head -1)
+            ver=$(mysqld --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
         fi
         findings="${findings} MySQL/MariaDB 버전: ${ver:-확인불가}"
         # EOS: MySQL 5.6 이하, MariaDB 10.3 이하
@@ -3265,7 +3260,7 @@ check_D08() {
     fi
     if [[ $PG_INSTALLED -eq 1 ]]; then
         local ver
-        ver=$(psql --version 2>/dev/null | grep -oP '[\d]+\.[\d]+' | head -1)
+        ver=$(psql --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
         findings="${findings}; PostgreSQL 버전: ${ver:-확인불가}"
         # EOS: PG 11 이하
         if [[ -n "$ver" ]]; then
@@ -3357,7 +3352,7 @@ check_V03() {
     status="$STATUS_PASS"
     detail="OpenSSL 버전: ${ver}"
     local num_ver
-    num_ver=$(echo "$ver" | grep -oP '^[\d]+\.[\d]+\.[\d]+')
+    num_ver=$(echo "$ver" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
     if [[ -n "$num_ver" ]]; then
         version_compare "$num_ver" "1.1.0"
         if [[ $? -eq 0 ]]; then
@@ -3556,7 +3551,7 @@ check_V11() {
     fi
 
     local ver
-    ver=$(smbd --version 2>/dev/null | grep -oP '[\d]+\.[\d]+\.[\d]+')
+    ver=$(smbd --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
     status="$STATUS_PASS"
     detail="Samba 버전: ${ver:-확인불가}"
     if [[ -n "$ver" ]]; then
@@ -3573,7 +3568,7 @@ check_V12() {
     local status="$STATUS_PASS" detail=""
 
     local ver
-    ver=$(ldd --version 2>&1 | head -1 | grep -oP '[\d]+\.[\d]+')
+    ver=$(ldd --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+')
     detail="glibc 버전: ${ver:-확인불가}"
     if [[ -n "$ver" ]]; then
         version_in_range "$ver" "2.17" "2.38" && { status="$STATUS_FAIL"; detail="${detail} (2.17~2.37 CVE-2023-6246 취약 가능)"; }
@@ -3588,9 +3583,9 @@ check_V13() {
     local status="$STATUS_PASS" detail=""
 
     local ver
-    ver=$(ssh -V 2>&1 | grep -oP '[\d]+\.[\d]+p[\d]+' | head -1)
+    ver=$(ssh -V 2>&1 | grep -oE '[0-9]+\.[0-9]+p[0-9]+' | head -1)
     local num_ver
-    num_ver=$(echo "$ver" | grep -oP '^[\d]+\.[\d]+')
+    num_ver=$(echo "$ver" | grep -oE '^[0-9]+\.[0-9]+')
     detail="OpenSSH 버전: ${ver:-확인불가}"
     if [[ -n "$num_ver" ]]; then
         version_in_range "$num_ver" "8.5" "9.8" && { status="$STATUS_FAIL"; detail="${detail} (8.5p1~9.7p1 취약 가능)"; }
@@ -3626,7 +3621,7 @@ check_V15() {
     local status="$STATUS_PASS" detail=""
 
     local ver
-    ver=$(ldd --version 2>&1 | head -1 | grep -oP '[\d]+\.[\d]+')
+    ver=$(ldd --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+')
     detail="glibc 버전: ${ver:-확인불가}"
     if [[ -n "$ver" ]]; then
         version_in_range "$ver" "2.34" "2.39" && { status="$STATUS_FAIL"; detail="${detail} (2.34~2.38 취약 가능)"; }
@@ -3695,7 +3690,7 @@ check_I01() {
         status="$STATUS_FAIL"
         detail="의심 항목 발견:${findings}"
     else
-        detail="알려진 rootkit 흔적 없음 (${#rk_paths} 경로 점검, PID 비교 완료)"
+        detail="알려진 rootkit 흔적 없음 ($(echo $rk_paths | wc -w) 경로 점검, PID 비교 완료)"
     fi
     [[ -n "$suspicious_modules" ]] && detail="${detail}; 참조 없는 커널 모듈: $(echo "$suspicious_modules" | tr '\n' ',')"
     current="${detail}"
@@ -3933,7 +3928,12 @@ main() {
     local json_output
     json_output=$(assemble_json)
 
-    echo "$json_output" > "$OUTPUT_FILE"
+    # 출력파일 안전하게 생성 (600 퍼미션, symlink 방지)
+    rm -f "$OUTPUT_FILE" 2>/dev/null
+    (umask 077; echo "$json_output" > "$OUTPUT_FILE") || {
+        log "ERROR: JSON 출력 실패: ${OUTPUT_FILE}"
+        exit 1
+    }
 
     local end_time elapsed
     end_time=$(date +%s)
