@@ -58,6 +58,10 @@ if [[ -z "$OUTPUT_FILE" ]]; then
     OUTPUT_FILE="/tmp/kisa_scan_$(hostname)_$(date +%Y%m%d_%H%M%S).json"
 fi
 
+# 리소스 보호: CPU/IO 우선순위를 최저로 설정 (1CPU/1GB VM 서비스 가용성 보호)
+renice -n 19 $$ &>/dev/null
+ionice -c 3 -p $$ &>/dev/null  # idle I/O class
+
 ###############################################################################
 # Section 1: 유틸리티 함수
 ###############################################################################
@@ -209,7 +213,7 @@ get_sshd_config_value() {
 run_with_timeout() {
     local timeout_sec="$1"
     shift
-    timeout "$timeout_sec" "$@" 2>/dev/null
+    timeout "$timeout_sec" nice -n 19 "$@" 2>/dev/null
 }
 
 # version_compare V1 V2 → returns 0 if V1<V2, 1 if V1==V2, 2 if V1>V2
@@ -244,7 +248,22 @@ version_in_range() {
 
 
 # 공통 find 제외 경로 (가상FS, 마운트, 컨테이너 등)
-FIND_PRUNE="-path /proc -prune -o -path /sys -prune -o -path /dev -prune -o -path /run -prune -o -path /mnt -prune -o -path /snap -prune -o -path /var/lib/docker -prune -o -path /var/lib/lxd -prune -o -path /var/lib/containers -prune"
+# 함수로 래핑하여 eval 없이 사용
+find_system() {
+    # Usage: find_system [추가 find 옵션...]
+    # 공통 prune 경로 + 사용자 지정 옵션으로 find 실행
+    find / \
+        -path /proc -prune -o \
+        -path /sys -prune -o \
+        -path /dev -prune -o \
+        -path /run -prune -o \
+        -path /mnt -prune -o \
+        -path /snap -prune -o \
+        -path /var/lib/docker -prune -o \
+        -path /var/lib/lxd -prune -o \
+        -path /var/lib/containers -prune -o \
+        "$@" 2>/dev/null
+}
 
 get_ip_addresses() {
     if command -v ip &>/dev/null; then
@@ -889,7 +908,7 @@ check_U15() {
     local status="$STATUS_PASS" detail=""
 
     local noowner_files
-    noowner_files=$(eval "run_with_timeout 30 find / $FIND_PRUNE -o \( -nouser -o -nogroup \) -print" 2>/dev/null | head -20)
+    noowner_files=$(run_with_timeout 30 find_system \( -nouser -o -nogroup \) -print | head -20)
 
     if [[ -n "$noowner_files" ]]; then
         status="$STATUS_FAIL"
@@ -1125,7 +1144,7 @@ check_U23() {
     local dangerous_suids="/usr/bin/newgrp /usr/sbin/traceroute /usr/bin/chfn /usr/bin/chsh /usr/bin/wall /usr/bin/write /usr/sbin/usernetctl"
 
     local suid_files
-    suid_files=$(eval "run_with_timeout 30 find / $FIND_PRUNE -o -type f \( -perm -4000 -o -perm -2000 \) -print" 2>/dev/null | head -200)
+    suid_files=$(run_with_timeout 30 find_system -type f \( -perm -4000 -o -perm -2000 \) -print | head -200)
 
     local found_dangerous=""
     if [[ -n "$suid_files" ]]; then
@@ -1202,7 +1221,7 @@ check_U25() {
     local status="$STATUS_PASS" detail=""
 
     local ww_files
-    ww_files=$(eval "run_with_timeout 30 find / $FIND_PRUNE -o -path /tmp -prune -o -path /var/tmp -prune -o -type f -perm -0002 -print" 2>/dev/null | head -20)
+    ww_files=$(run_with_timeout 30 find_system -path /tmp -prune -o -path /var/tmp -prune -o -type f -perm -0002 -print | head -20)
 
     if [[ -n "$ww_files" ]]; then
         status="$STATUS_FAIL"
@@ -3740,7 +3759,7 @@ check_I02() {
     for dr in $docroots; do
         [[ -d "$dr" ]] || continue
         local suspects
-        suspects=$(run_with_timeout 30 find "$dr" -type f \( -name '*.php' -o -name '*.jsp' -o -name '*.jspx' \) -exec grep -rlE "${patterns}|${jsp_patterns}" {} \; 2>/dev/null | head -20)
+        suspects=$(run_with_timeout 30 find "$dr" -type f \( -name '*.php' -o -name '*.jsp' -o -name '*.jspx' \) -print0 2>/dev/null | xargs -0 grep -rlE "${patterns}|${jsp_patterns}" 2>/dev/null | head -20)
         if [[ -n "$suspects" ]]; then
             local cnt
             cnt=$(echo "$suspects" | wc -l)
