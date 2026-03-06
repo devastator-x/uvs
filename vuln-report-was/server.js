@@ -3,15 +3,41 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const puppeteer = require('puppeteer');
+const session = require('express-session');
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = 3000;
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
+const USERS_FILE = path.join(__dirname, 'users.json');
 
 // Ensure uploads directory exists
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
+
+// --- User management ---
+function loadUsers() {
+  if (!fs.existsSync(USERS_FILE)) return [];
+  try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); }
+  catch { return []; }
+}
+
+function saveUsers(users) {
+  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf8');
+}
+
+// Initialize admin account if no users exist
+(function initAdmin() {
+  const users = loadUsers();
+  if (users.length === 0) {
+    const defaultPassword = 'admin';
+    const hash = bcrypt.hashSync(defaultPassword, 10);
+    saveUsers([{ username: 'admin', password: hash, role: 'admin', created: new Date().toISOString() }]);
+    console.log('초기 admin 계정 생성됨 (ID: admin / PW: admin) - 반드시 비밀번호를 변경하세요!');
+  }
+})();
 
 // View engine
 app.set('view engine', 'ejs');
@@ -20,6 +46,106 @@ app.set('views', path.join(__dirname, 'views'));
 // Static files
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.urlencoded({ extended: true }));
+
+// Session
+app.use(session({
+  secret: crypto.randomBytes(32).toString('hex'),
+  resave: false,
+  saveUninitialized: false,
+  cookie: { maxAge: 8 * 60 * 60 * 1000 }
+}));
+
+// Auth middleware
+function requireLogin(req, res, next) {
+  if (req.session && req.session.user) return next();
+  res.redirect('/login');
+}
+
+function requireAdmin(req, res, next) {
+  if (req.session && req.session.user && req.session.user.role === 'admin') return next();
+  res.status(403).send('접근 권한이 없습니다.');
+}
+
+// Make user available in all templates
+app.use((req, res, next) => {
+  res.locals.currentUser = req.session ? req.session.user : null;
+  next();
+});
+
+// --- Auth routes ---
+app.get('/login', (req, res) => {
+  if (req.session && req.session.user) return res.redirect('/');
+  res.render('login', { error: req.query.error || null });
+});
+
+app.post('/login', (req, res) => {
+  const { username, password } = req.body;
+  const users = loadUsers();
+  const user = users.find(u => u.username === username);
+  if (!user || !bcrypt.compareSync(password, user.password)) {
+    return res.redirect('/login?error=' + encodeURIComponent('아이디 또는 비밀번호가 올바르지 않습니다.'));
+  }
+  req.session.user = { username: user.username, role: user.role };
+  res.redirect('/');
+});
+
+app.get('/logout', (req, res) => {
+  req.session.destroy();
+  res.redirect('/login');
+});
+
+// --- Admin routes ---
+app.get('/admin', requireLogin, requireAdmin, (req, res) => {
+  const users = loadUsers().map(u => ({ username: u.username, role: u.role, created: u.created }));
+  res.render('admin', { users, message: req.query.message || null, error: req.query.error || null });
+});
+
+app.post('/admin/add-user', requireLogin, requireAdmin, (req, res) => {
+  const { username, password, role } = req.body;
+  if (!username || !password) {
+    return res.redirect('/admin?error=' + encodeURIComponent('아이디와 비밀번호를 입력하세요.'));
+  }
+  if (username.length < 2 || password.length < 4) {
+    return res.redirect('/admin?error=' + encodeURIComponent('아이디 2자 이상, 비밀번호 4자 이상 입력하세요.'));
+  }
+  const users = loadUsers();
+  if (users.find(u => u.username === username)) {
+    return res.redirect('/admin?error=' + encodeURIComponent('이미 존재하는 아이디입니다.'));
+  }
+  const hash = bcrypt.hashSync(password, 10);
+  users.push({ username, password: hash, role: role === 'admin' ? 'admin' : 'user', created: new Date().toISOString() });
+  saveUsers(users);
+  res.redirect('/admin?message=' + encodeURIComponent(`사용자 "${username}" 추가 완료`));
+});
+
+app.post('/admin/delete-user', requireLogin, requireAdmin, (req, res) => {
+  const { username } = req.body;
+  if (username === 'admin') {
+    return res.redirect('/admin?error=' + encodeURIComponent('기본 admin 계정은 삭제할 수 없습니다.'));
+  }
+  let users = loadUsers();
+  users = users.filter(u => u.username !== username);
+  saveUsers(users);
+  res.redirect('/admin?message=' + encodeURIComponent(`사용자 "${username}" 삭제 완료`));
+});
+
+app.post('/admin/change-password', requireLogin, requireAdmin, (req, res) => {
+  const { username, newPassword } = req.body;
+  if (!newPassword || newPassword.length < 4) {
+    return res.redirect('/admin?error=' + encodeURIComponent('비밀번호는 4자 이상 입력하세요.'));
+  }
+  const users = loadUsers();
+  const user = users.find(u => u.username === username);
+  if (!user) {
+    return res.redirect('/admin?error=' + encodeURIComponent('사용자를 찾을 수 없습니다.'));
+  }
+  user.password = bcrypt.hashSync(newPassword, 10);
+  saveUsers(users);
+  res.redirect('/admin?message=' + encodeURIComponent(`"${username}" 비밀번호 변경 완료`));
+});
+
+// Apply login requirement to all routes below
+app.use(requireLogin);
 
 // Multer configuration
 const storage = multer.diskStorage({

@@ -8,8 +8,14 @@
 </head>
 <body>
   <div class="container">
-    <header>
+    <header class="report-header">
       <h1>취약점 점검 보고서 시스템</h1>
+      <div>
+        <% if (currentUser && currentUser.role === 'admin') { %>
+          <a href="/admin" class="btn btn-sm btn-back">사용자 관리</a>
+        <% } %>
+        <a href="/logout" class="btn btn-sm btn-delete">로그아웃 (<%= currentUser ? currentUser.username : '' %>)</a>
+      </div>
     </header>
 
     <% if (message) { %>
