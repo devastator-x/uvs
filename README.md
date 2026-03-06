@@ -65,6 +65,46 @@ node server.js
 
 브라우저에서 `http://localhost:3000` 접속
 
+### systemd 서비스 등록 (백그라운드 상시 실행)
+
+서비스 파일 생성:
+
+```bash
+cat <<'EOF' > /etc/systemd/system/vuln-report-was.service
+[Unit]
+Description=Vuln Report WAS - 취약점 점검 보고서 시스템
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/volume/AISpera/vuln_scanner/vuln-report-was
+ExecStart=/root/.nvm/versions/node/v24.14.0/bin/node server.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+서비스 등록 및 시작:
+
+```bash
+systemctl daemon-reload
+systemctl enable vuln-report-was   # 부팅 시 자동 시작
+systemctl start vuln-report-was    # 서비스 시작
+```
+
+주요 관리 명령어:
+
+| 명령어 | 설명 |
+|--------|------|
+| `systemctl status vuln-report-was` | 상태 확인 |
+| `systemctl restart vuln-report-was` | 재시작 |
+| `systemctl stop vuln-report-was` | 중지 |
+| `journalctl -u vuln-report-was -f` | 실시간 로그 확인 |
+
 ### PDF 한글 폰트 (필요 시)
 
 ```bash
