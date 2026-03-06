@@ -3764,7 +3764,7 @@ check_I02() {
     for dr in $docroots; do
         [[ -d "$dr" ]] || continue
         local suspects
-        suspects=$(run_with_timeout 30 find "$dr" -type f \( -name '*.php' -o -name '*.jsp' -o -name '*.jspx' \) -print0 2>/dev/null | xargs -0 grep -rlE "${patterns}|${jsp_patterns}" 2>/dev/null | head -20)
+        suspects=$(run_with_timeout 30 bash -c "find '$dr' -type f \( -name '*.php' -o -name '*.jsp' -o -name '*.jspx' \) -print0 2>/dev/null | xargs -0 grep -lE '${patterns}|${jsp_patterns}' 2>/dev/null | head -20")
         if [[ -n "$suspects" ]]; then
             local cnt
             cnt=$(echo "$suspects" | wc -l)
