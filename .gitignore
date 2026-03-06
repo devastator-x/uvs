@@ -2,6 +2,7 @@
 *.tar
 *.json
 *.md
+!README.md
 *.log
 *.csv
 .claude/
