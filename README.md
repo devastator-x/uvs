@@ -105,6 +105,65 @@ systemctl start vuln-report-was    # 서비스 시작
 | `systemctl stop vuln-report-was` | 중지 |
 | `journalctl -u vuln-report-was -f` | 실시간 로그 확인 |
 
+### HTTPS 설정 (Nginx 리버스 프록시)
+
+자체 서명 SSL 인증서 생성:
+
+```bash
+mkdir -p /etc/nginx/ssl
+openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+  -keyout /etc/nginx/ssl/vuln-report.key \
+  -out /etc/nginx/ssl/vuln-report.crt \
+  -subj "/C=KR/ST=Seoul/O=AISpera/CN=vuln-report"
+```
+
+Nginx 설치 및 설정:
+
+```bash
+# RHEL/CentOS/Rocky
+dnf install -y nginx
+```
+
+`/etc/nginx/conf.d/vuln-report-was.conf` 생성:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name _;
+
+    ssl_certificate     /etc/nginx/ssl/vuln-report.crt;
+    ssl_certificate_key /etc/nginx/ssl/vuln-report.key;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    client_max_body_size 50m;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+server {
+    listen 80;
+    server_name _;
+    return 301 https://$host$request_uri;
+}
+```
+
+Nginx 시작:
+
+```bash
+systemctl enable nginx
+systemctl start nginx
+```
+
+`https://<서버IP>`로 접속 (자체 서명 인증서이므로 브라우저 보안 경고 시 "고급" → "계속 진행")
+
 ### PDF 한글 폰트 (필요 시)
 
 ```bash
