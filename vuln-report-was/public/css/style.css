@@ -335,12 +335,17 @@ header h1 {
 
 /* Print */
 @media print {
-  body { background: #fff; }
-  .btn, .upload-section, .table-controls, .actions, .btn-download-main, .btn-back { display: none !important; }
-  .container { max-width: 100%; padding: 0; }
-  .server-table, .results-table { box-shadow: none; }
+  body { background: #fff; font-size: 9pt; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .btn, .upload-section, .table-controls, .actions, .btn-download-main, .btn-back, .report-header .btn { display: none !important; }
+  .container { max-width: 100%; padding: 0; margin: 0; }
+  .report-header { margin-bottom: 12px; }
+  .server-table, .results-table { box-shadow: none; border: 1px solid #d1d5db; }
   .card { box-shadow: none; border: 1px solid #e5e7eb; }
-  .chart-container { box-shadow: none; border: 1px solid #e5e7eb; }
-  .system-info { box-shadow: none; border: 1px solid #e5e7eb; }
+  .chart-container { box-shadow: none; border: 1px solid #e5e7eb; page-break-inside: avoid; }
+  .system-info { box-shadow: none; border: 1px solid #e5e7eb; page-break-inside: avoid; }
+  .dashboard { page-break-inside: avoid; }
   .results-table tbody tr { page-break-inside: avoid; }
+  .results-table th, .results-table td { padding: 6px 8px; }
+  .col-detail, .col-settings { max-width: 250px; }
+  .badge, .importance { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }

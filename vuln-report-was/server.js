@@ -2,7 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const ejs = require('ejs');
+const puppeteer = require('puppeteer');
 
 const app = express();
 const PORT = 3000;
@@ -46,8 +46,14 @@ const upload = multer({
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB
 });
 
+// Helper: validate filename (prevent path traversal)
+function isSafeFilename(filename) {
+  return filename && !filename.includes('/') && !filename.includes('\\') && !filename.includes('..');
+}
+
 // Helper: parse JSON file and extract summary info
 function parseReportFile(filename) {
+  if (!isSafeFilename(filename)) return null;
   const filePath = path.join(UPLOADS_DIR, filename);
   try {
     const raw = fs.readFileSync(filePath, 'utf8');
@@ -105,7 +111,14 @@ app.get('/', (req, res) => {
 });
 
 // POST /upload - Upload JSON files
-app.post('/upload', upload.array('files', 50), (req, res) => {
+app.post('/upload', (req, res, next) => {
+  upload.array('files', 50)(req, res, (err) => {
+    if (err) {
+      return res.redirect('/?error=' + encodeURIComponent(err.message));
+    }
+    next();
+  });
+}, (req, res) => {
   if (!req.files || req.files.length === 0) {
     return res.redirect('/?error=' + encodeURIComponent('파일을 선택해주세요.'));
   }
@@ -165,35 +178,49 @@ app.get('/report/:filename', (req, res) => {
   res.render('report', { report, categoryStats });
 });
 
-// GET /download/:filename - Download HTML report
-app.get('/download/:filename', (req, res) => {
+// GET /download/:filename - Download PDF (puppeteer navigates to the report page itself)
+app.get('/download/:filename', async (req, res) => {
   const report = parseReportFile(req.params.filename);
   if (!report) {
     return res.status(404).send('보고서를 찾을 수 없습니다.');
   }
-  const categoryStats = getCategoryStats(report.results);
-  const templatePath = path.join(__dirname, 'templates', 'export-report.ejs');
 
-  ejs.renderFile(templatePath, { report, categoryStats }, (err, html) => {
-    if (err) {
-      console.error('Template render error:', err);
-      return res.status(500).send('보고서 생성 중 오류가 발생했습니다.');
-    }
+  try {
+    const browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1400, height: 900 });
+    const reportUrl = `http://localhost:${PORT}/report/${encodeURIComponent(req.params.filename)}`;
+    await page.goto(reportUrl, { waitUntil: 'networkidle0', timeout: 30000 });
+
+    const pdfData = await page.pdf({
+      format: 'A4',
+      landscape: false,
+      printBackground: true,
+      scale: 0.65,
+      margin: { top: '10mm', right: '10mm', bottom: '10mm', left: '10mm' }
+    });
+    await browser.close();
+
     const dateStr = report.scan_date ? report.scan_date.substring(0, 10) : 'nodate';
-    const downloadName = encodeURIComponent(`취약점점검보고서_${report.hostname}_${dateStr}.html`);
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    const downloadName = encodeURIComponent(`취약점점검보고서_${report.hostname}_${dateStr}.pdf`);
+    res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${downloadName}`);
-    res.send(html);
-  });
+    res.send(Buffer.from(pdfData));
+  } catch (err) {
+    console.error('PDF generation error:', err);
+    res.status(500).send('PDF 생성 중 오류가 발생했습니다.');
+  }
 });
 
 // POST /delete/:filename - Delete uploaded file
 app.post('/delete/:filename', (req, res) => {
-  const filePath = path.join(UPLOADS_DIR, req.params.filename);
-  // Prevent path traversal
-  if (!filePath.startsWith(UPLOADS_DIR)) {
+  if (!isSafeFilename(req.params.filename)) {
     return res.status(403).send('접근 거부');
   }
+  const filePath = path.join(UPLOADS_DIR, req.params.filename);
   try {
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
