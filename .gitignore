@@ -1,6 +1,9 @@
 *.bak
 *.tar
 *.json
+*.md
+*.log
+*.csv
 .claude/
 Unix_Vulnerability_Scanner_v3.2_decoded/
 node_modules/
