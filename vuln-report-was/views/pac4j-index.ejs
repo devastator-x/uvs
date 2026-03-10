@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>서버 취약점 점검 - 보고서 시스템</title>
+  <title>CVE-2026-29000 pac4j-jwt - 보고서 시스템</title>
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
   <div class="container">
-    <%- include('partials/nav', { activeScanner: 'vuln' }) %>
+    <%- include('partials/nav', { activeScanner: 'pac4j' }) %>
 
     <% if (message) { %>
       <div class="alert alert-success"><%= message %></div>
@@ -19,7 +19,7 @@
 
     <!-- Upload Section -->
     <section class="upload-section">
-      <form id="uploadForm" action="/vuln/upload" method="POST" enctype="multipart/form-data">
+      <form id="uploadForm" action="/pac4j/upload" method="POST" enctype="multipart/form-data">
         <div class="dropzone" id="dropzone">
           <div class="dropzone-content">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="1.5">
@@ -27,8 +27,8 @@
               <polyline points="17 8 12 3 7 8"/>
               <line x1="12" y1="3" x2="12" y2="15"/>
             </svg>
-            <p>서버 취약점 점검 JSON 파일을 드래그하거나 클릭하여 선택하세요</p>
-            <p class="dropzone-hint">여러 파일 동시 업로드 가능 (vul_scanner.sh 결과)</p>
+            <p>CVE-2026-29000 pac4j-jwt 점검 JSON 파일을 드래그하거나 클릭하여 선택하세요</p>
+            <p class="dropzone-hint">여러 파일 동시 업로드 가능 (cve_2026_29000_pac4j_scanner.sh 결과)</p>
           </div>
           <input type="file" id="fileInput" name="files" accept=".json" multiple hidden>
         </div>
@@ -39,9 +39,9 @@
 
     <!-- Server List Section -->
     <section class="list-section">
-      <h2>업로드된 서버 목록 (<%= reports.length %>건)</h2>
+      <h2>점검 결과 목록 (<%= reports.length %>건)</h2>
       <% if (reports.length === 0) { %>
-        <p class="empty-message">업로드된 보고서가 없습니다.</p>
+        <p class="empty-message">업로드된 점검 결과가 없습니다.</p>
       <% } else { %>
         <div class="table-responsive">
           <table class="server-table">
@@ -49,11 +49,12 @@
               <tr>
                 <th>호스트명</th>
                 <th>OS</th>
+                <th>환경</th>
                 <th>점검일</th>
                 <th class="num-col">총 항목</th>
                 <th class="num-col">취약</th>
                 <th class="num-col">양호</th>
-                <th class="num-col">N/A</th>
+                <th class="num-col">확인불가</th>
                 <th>작업</th>
               </tr>
             </thead>
@@ -62,15 +63,16 @@
                 <tr>
                   <td class="hostname"><%= r.hostname %></td>
                   <td><%= r.os %> <%= r.os_version %></td>
+                  <td><%= r.host_environment %><%= r.container_runtime && r.container_runtime !== 'none' ? ' / ' + r.container_runtime : '' %></td>
                   <td><%= r.scan_date ? r.scan_date.substring(0, 10) : '-' %></td>
                   <td class="num-col"><%= r.summary.total %></td>
-                  <td class="num-col"><span class="badge badge-fail"><%= r.summary.fail %></span></td>
-                  <td class="num-col"><span class="badge badge-pass"><%= r.summary.pass %></span></td>
-                  <td class="num-col"><span class="badge badge-na"><%= r.summary.na %></span></td>
+                  <td class="num-col"><span class="badge badge-fail"><%= r.summary.vulnerable %></span></td>
+                  <td class="num-col"><span class="badge badge-pass"><%= r.summary.safe %></span></td>
+                  <td class="num-col"><span class="badge badge-na"><%= r.summary.unknown %></span></td>
                   <td class="actions">
-                    <a href="/vuln/report/<%= r.filename %>" class="btn btn-sm btn-view">보기</a>
-                    <a href="/vuln/download/<%= r.filename %>" class="btn btn-sm btn-download">PDF</a>
-                    <form action="/vuln/delete/<%= r.filename %>" method="POST" class="inline-form"
+                    <a href="/pac4j/report/<%= r.filename %>" class="btn btn-sm btn-view">보기</a>
+                    <a href="/pac4j/download/<%= r.filename %>" class="btn btn-sm btn-download">PDF</a>
+                    <form action="/pac4j/delete/<%= r.filename %>" method="POST" class="inline-form"
                           onsubmit="return confirm('정말 삭제하시겠습니까?')">
                       <button type="submit" class="btn btn-sm btn-delete">삭제</button>
                     </form>

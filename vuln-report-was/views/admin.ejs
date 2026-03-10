@@ -38,12 +38,10 @@
 </head>
 <body>
   <div class="container">
-    <div class="admin-header">
+    <%- include('partials/nav', { activeScanner: '' }) %>
+
+    <div class="admin-header" style="margin-top:16px;">
       <h1>사용자 관리</h1>
-      <div>
-        <a href="/" class="btn btn-back">목록으로</a>
-        <a href="/logout" class="btn btn-sm btn-delete">로그아웃</a>
-      </div>
     </div>
 
     <% if (message) { %>

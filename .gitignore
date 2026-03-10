@@ -3,6 +3,7 @@
 *.json
 *.md
 !README.md
+!MANUAL.md
 *.log
 *.csv
 .claude/

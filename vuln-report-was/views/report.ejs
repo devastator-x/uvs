@@ -9,14 +9,15 @@
 </head>
 <body>
   <div class="container">
-    <header class="report-header">
+    <%- include('partials/nav', { activeScanner: 'vuln' }) %>
+
+    <header class="report-header" style="margin-top:16px;">
       <div class="header-left">
-        <a href="/" class="btn btn-sm btn-back">&larr; 목록</a>
+        <a href="/vuln" class="btn btn-sm btn-back">&larr; 목록</a>
         <h1>취약점 점검 보고서</h1>
       </div>
       <div>
-        <a href="/download/<%= report.filename %>" class="btn btn-primary btn-download-main">PDF 다운로드</a>
-        <a href="/logout" class="btn btn-sm btn-delete">로그아웃</a>
+        <a href="/vuln/download/<%= report.filename %>" class="btn btn-primary btn-download-main">PDF 다운로드</a>
       </div>
     </header>
 
